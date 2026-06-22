@@ -1,231 +1,245 @@
 # eBPF Server Monitor
 
-這是畢業專題 MVP 的 Phase 1 到 Phase 3 最小可跑版本。
+基於 eBPF 的 Linux 主機監控平台。
 
-目前先不包含 Docker、WebSocket、PostgreSQL。此版本使用 `psutil_agent.py` 收集 CPU、Memory 與 Load Average，並使用 `execsnoop_agent.py` 讀取 `execsnoop-bpfcc` 的 process events，送到 FastAPI Backend 後在 React Dashboard 顯示。
+本專案利用 Linux eBPF 技術收集系統執行資訊，並透過 FastAPI 與 React Dashboard 進行即時監控與視覺化展示。
 
-## 技術
+目前已完成 CPU、記憶體、Load Average 監控，以及基於 eBPF 的 Process Monitoring 功能。
 
-- Backend: FastAPI + SQLite
-- Agent: Python psutil agent + execsnoop process agent
-- Frontend: React + Vite
+---
 
-## Phase Status
+# 專案目標
 
-- Phase 1 - Environment Setup: completed
-- Phase 2 - Verify eBPF Tools: completed
-- Phase 3 - Process Monitoring Agent: completed
+傳統監控工具大多只能看到：
 
-Phase 3 completed includes:
+- CPU 使用率
+- 記憶體使用率
+- 磁碟空間
+- 網路流量
 
-- eBPF exec monitoring with BCC `execsnoop-bpfcc`
-- Ubuntu agent parses process exec events into JSON
-- VSCode Remote background process noise filtering
-- FastAPI stores process events in SQLite
-- Dashboard and API query recent process events
+但管理 Linux 主機時，往往更需要了解：
 
-## 專案結構
+- 系統正在執行哪些程式
+- 有哪些新程序被啟動
+- 主機是否出現異常行為
+- 是否存在潛在安全風險
 
-```text
-ebpf-server-monitor/
-├── agent/
-│   ├── execsnoop_agent.py
-│   ├── psutil_agent.py
-│   └── requirements.txt
-├── backend/
-│   ├── app/
-│   │   ├── api/
-│   │   │   ├── events.py
-│   │   │   └── metrics.py
-│   │   ├── db/
-│   │   │   └── database.py
-│   │   ├── schemas/
-│   │   │   ├── events.py
-│   │   │   └── metrics.py
-│   │   └── main.py
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   ├── package.json
-│   └── vite.config.ts
-└── README.md
-```
+因此本專案希望透過 eBPF 技術建立一套輕量化 Linux 可觀測性（Observability）平台，提供更深入的系統行為分析能力。
 
-## 啟動 Backend
+---
 
-開一個 terminal：
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-Backend 啟動後會自動建立 SQLite DB：
+# 系統架構
 
 ```text
-backend/monitor.db
+Linux Host
+    │
+    ▼
+eBPF (BCC execsnoop)
+    │
+    ▼
+Python Agent
+    │
+    ▼
+FastAPI Backend
+    │
+    ▼
+SQLite Database
+    │
+    ▼
+React Dashboard
 ```
 
-健康檢查：
+---
 
-```bash
-curl http://127.0.0.1:8000/api/health
-```
+# 已完成功能
 
-預期回應：
+## Phase 1：環境建置
 
-```json
-{"status":"ok"}
-```
+- Linux 開發環境建立
+- eBPF 工具安裝驗證
+- BCC 工具測試
+- FastAPI Backend 建立
+- React Frontend 建立
 
-## 啟動 psutil Agent
+---
 
-再開一個 terminal：
+## Phase 2：系統監控平台
 
-```bash
-cd agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python psutil_agent.py
-```
-
-它會每 3 秒收集並送出一筆真實 system metric：
-
-- `host`
-- `cpu_usage`
-- `memory_total`
-- `memory_used`
-- `memory_usage`
-- `load_avg_1`
-- `load_avg_5`
-- `load_avg_15`
-
-如果 backend 不是跑在預設網址，可以指定：
-
-```bash
-python psutil_agent.py --backend http://127.0.0.1:8000 --interval 3
-```
-
-## 啟動 execsnoop Process Agent
-
-`execsnoop-bpfcc` 需要 root 權限。Backend 啟動後，再開一個 terminal：
-
-```bash
-cd agent
-source .venv/bin/activate
-sudo -E .venv/bin/python execsnoop_agent.py --backend http://127.0.0.1:8000
-```
-
-預設會優先執行：
-
-```bash
-stdbuf -oL -eL execsnoop-bpfcc -U
-```
-
-如果系統沒有 `stdbuf`，會自動退回 `execsnoop-bpfcc -U`。`-U` 讓輸出包含 UID，符合目前 Process Events API 需要的欄位。agent 會從 `execsnoop-bpfcc` 的 header 動態偵測欄位名稱，不依賴固定欄位位置。
-
-如果需要檢查 `execsnoop-bpfcc` 的原始輸出是否有進入 Python agent，可以使用 debug 模式：
-
-```bash
-sudo -E .venv/bin/python execsnoop_agent.py --backend http://127.0.0.1:8000 --debug
-```
-
-agent 會在送入 Backend 前過濾常見 VSCode Remote 背景事件，例如 `cpuUsage.sh`、`/proc/*/stat`、`sed ... /proc/stat`、`ps -ax -o ...`、`which ps`、`sleep 1`、`/bin/sh -c which ps`、`lesspipe`、`basename`、`dirname`、`dircolors`、`uname`。debug 模式會印出被忽略事件的原因。
-
-如果需要指定不同的 execsnoop 指令：
-
-```bash
-sudo -E .venv/bin/python execsnoop_agent.py \
-  --backend http://127.0.0.1:8000 \
-  --execsnoop-command execsnoop-bpfcc -U
-```
-
-## 啟動 Frontend
-
-再開一個 terminal：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-打開：
-
-```text
-http://127.0.0.1:5173
-```
-
-Dashboard 會顯示：
+### 主機監控
 
 - CPU Usage
 - Memory Usage
 - Load Average
-- Process Event Count
-- Recent CPU Samples
-- Recent Process Events from eBPF `execsnoop-bpfcc`
-- Process event search by command, PID, or filename
 
-## API
+### 後端服務
 
-### Health
+- FastAPI REST API
+- SQLite 資料儲存
+- Metrics API
 
-```http
-GET /api/health
+### 前端儀表板
+
+- 即時資料更新
+- 歷史資料顯示
+- Dashboard 視覺化介面
+
+---
+
+## Phase 3：eBPF 程序監控
+
+### eBPF Process Monitoring
+
+透過 BCC 提供的：
+
+```bash
+execsnoop-bpfcc
 ```
 
-### System Metrics
+監控 Linux 主機上的程序執行事件。
 
-```http
-POST /api/metrics/system
-GET /api/metrics/system?limit=50
+### 已完成內容
+
+- eBPF Process Event 收集
+- Ubuntu Agent 事件解析
+- VSCode Remote 背景噪音過濾
+- Process Event 儲存至 SQLite
+- Process Event API
+- Dashboard 顯示最近執行事件
+- Process Event 搜尋功能
+
+### 範例事件
+
+```text
+時間：2026-06-22 20:17:01
+
+PID：57162
+
+Command：
+run-parts
+
+Executable：
+/usr/bin/run-parts --report /etc/cron.hourly
 ```
 
-POST 範例：
+---
 
-```json
-{
-  "host": "localhost",
-  "cpu_usage": 42.5,
-  "memory_total": 17179869184,
-  "memory_used": 8589934592,
-  "memory_usage": 50.0,
-  "load_avg_1": 1.2,
-  "load_avg_5": 1.1,
-  "load_avg_15": 0.9
-}
-```
+# 技術架構
 
-### Process Events
+## Backend
 
-```http
-POST /api/events/process
-GET /api/events/process?limit=50
-```
+- FastAPI
+- SQLite
+- Pydantic
 
-POST 範例：
+## Frontend
 
-```json
-{
-  "host": "localhost",
-  "event_type": "exec",
-  "pid": 1234,
-  "ppid": 1,
-  "uid": 501,
-  "comm": "curl",
-  "filename": "/usr/bin/curl",
-  "exit_code": null
-}
-```
+- React
+- TypeScript
+- Vite
 
-## 開發備註
+## Monitoring
 
-- SQLite schema 目前在 `backend/app/db/database.py` 中初始化。
-- Frontend 目前用 HTTP polling，每 3 秒重新抓一次資料。
-- `psutil_agent.py` 只會送 system metrics。
-- `execsnoop_agent.py` 會把 `execsnoop-bpfcc` 輸出轉成 Process Events API payload。
-- Phase 3 已完成 process exec monitoring；目前尚未加入 WebSocket、Network eBPF、File I/O eBPF、PostgreSQL 或 Docker。
+- eBPF
+- BCC
+- execsnoop-bpfcc
+- psutil
+
+---
+
+# 專案目前狀態
+
+| 階段 | 狀態 |
+|--------|--------|
+| Phase 1：環境建置 | ✅ 完成 |
+| Phase 2：監控平台 | ✅ 完成 |
+| Phase 3：Process Monitoring | ✅ 完成 |
+| Phase 4：Network Monitoring | 🚧 規劃中 |
+| Phase 5：AI 風險分析 | 🚧 規劃中 |
+| Phase 6：本地 LLM 整合 | 🚧 規劃中 |
+| Phase 7：XDP 主動防禦 | 🚧 規劃中 |
+
+---
+
+# 未來發展方向
+
+本專案最終目標並非單純監控工具，而是打造：
+
+> 基於 eBPF 與 AI 的 Linux 主機可觀測性與安全分析平台
+
+預計未來加入：
+
+## Network Monitoring
+
+透過 eBPF 收集：
+
+- TCP 連線
+- UDP 流量
+- 網路行為分析
+
+---
+
+## File Monitoring
+
+監控：
+
+- 檔案建立
+- 檔案刪除
+- 敏感檔案存取
+
+---
+
+## AI 風險分析
+
+根據系統事件：
+
+- 建立風險評分
+- 偵測異常行為
+- 分析潛在攻擊
+
+---
+
+## Local LLM 整合
+
+透過本地大型語言模型：
+
+- 解釋系統事件
+- 分析異常原因
+- 提供管理建議
+
+避免敏感資料上傳至雲端服務。
+
+---
+
+## XDP 主動防禦
+
+當系統偵測到高風險流量時：
+
+- 封鎖來源 IP
+- 流量限制
+- 即時封包丟棄
+
+實現主動式防禦能力。
+
+---
+
+# 適用對象
+
+- Linux 初學者
+- 學校實驗室
+- 小型伺服器管理者
+- Homelab 使用者
+- 資訊安全研究
+
+---
+
+# 專案願景
+
+打造一套：
+
+**輕量化、可擴充、具備 AI 分析能力的 eBPF Linux 監控平台。**
+
+從傳統監控進一步發展為：
+
+**監控（Monitoring） → 分析（Analysis） → 解釋（Explanation） → 防禦（Mitigation）**
+
+的一體化解決方案。
